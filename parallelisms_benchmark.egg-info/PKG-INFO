@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: parallelisms-benchmark
+Version: 0.1.0
+Summary: vLLM Parallelism & Serving Config Research Benchmark Framework
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+
+# parallelisms-benchmark-copilot
