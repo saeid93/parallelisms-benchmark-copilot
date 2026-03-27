@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-{{ run_id_short }}
+  namespace: {{ namespace }}
+  labels:
+    app: parallelisms-benchmark
+    suite: {{ benchmark_suite }}
+    run-id: {{ run_id }}
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: parallelisms-benchmark
+        run-id: {{ run_id }}
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: benchmark
+          image: {{ image }}
+          env:
+            - name: RUN_ID
+              value: "{{ run_id }}"
+            - name: BENCHMARK_SUITE
+              value: "{{ benchmark_suite }}"
+            - name: TP
+              value: "{{ tp }}"
+            - name: PP
+              value: "{{ pp }}"
+            - name: DP
+              value: "{{ dp }}"
+            - name: DATASET
+              value: "{{ dataset }}"
+            - name: MAX_MODEL_LEN
+              value: "{{ max_model_len }}"
+            - name: GPU_MEM_UTIL
+              value: "{{ gpu_mem_util }}"
+            - name: CHUNKED_PREFILL
+              value: "{{ chunked_prefill }}"
+            - name: CHUNK_SIZE
+              value: "{{ chunk_size }}"
+            - name: DTYPE
+              value: "{{ dtype }}"
+            - name: ATTENTION_BACKEND
+              value: "{{ attention_backend }}"
+            - name: ARRIVAL_PROCESS
+              value: "{{ arrival_process }}"
+            - name: REQUEST_RATE_RPS
+              value: "{{ request_rate_rps }}"
+            - name: NUM_REQUESTS
+              value: "{{ num_requests }}"
+            - name: DISAGGREGATION_MODE
+              value: "{{ disaggregation_mode }}"
+            - name: RESULTS_DIR
+              value: /results
+          resources:
+            requests:
+              nvidia.com/gpu: "{{ gpu_count }}"
+            limits:
+              nvidia.com/gpu: "{{ gpu_count }}"
+          volumeMounts:
+            - mountPath: /results
+              name: results-volume
+      volumes:
+        - name: results-volume
+          persistentVolumeClaim:
+            claimName: {{ results_pvc }}
