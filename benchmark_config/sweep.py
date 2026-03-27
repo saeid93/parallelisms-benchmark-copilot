@@ -228,6 +228,15 @@ class SweepGenerator:
             ]
             sub_products.append(combos)
 
+        # If any dimension has an empty value list the product is empty,
+        # which is the correct behaviour (no configs to sweep).  When
+        # *dimensions* itself is empty the product yields one empty tuple
+        # and we emit a single base config – also intentional.
+        if not sub_products:
+            if self._is_valid(self.base):
+                yield self.base
+            return
+
         for combo in itertools.product(*sub_products):
             cfg = self.base
             for sub_name, overrides in combo:

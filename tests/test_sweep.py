@@ -146,3 +146,11 @@ class TestCustomSweep:
         configs = list(gen.custom_sweep({}))
         # No dimensions → single config (base)
         assert len(configs) == 1
+
+    def test_empty_value_list(self):
+        gen = SweepGenerator(max_gpus=8)
+        configs = list(gen.custom_sweep({
+            "parallelism": {"tensor_parallel_size": []},
+        }))
+        # Empty value list → no configs produced
+        assert len(configs) == 0
