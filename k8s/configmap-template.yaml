@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: benchmark-sweep-{{ slice_id }}
+  namespace: {{ namespace }}
+  labels:
+    app: parallelisms-benchmark
+    slice-id: "{{ slice_id }}"
+data:
+  sweep.json: |
+    {{ sweep_json }}
