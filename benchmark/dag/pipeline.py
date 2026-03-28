@@ -1,7 +1,7 @@
 """
 DAG pipeline orchestrator.
 
-Wires together all seven stages of the benchmark pipeline:
+Wires together all benchmark pipeline stages:
 
   Stage 1  — Config space generator (sweep.py)
   Stage 2  — Workload generator (workload/generator.py)
@@ -10,6 +10,13 @@ Wires together all seven stages of the benchmark pipeline:
   Stage 5  — SLO attainment evaluator (analysis/slo_evaluator.py)
   Stage 6  — Pareto analyser (analysis/pareto.py)
   Stage 7  — Recommendation synthesiser (analysis/recommender.py)
+  Stage 8  — Config validator (config/validation.py)
+  Stage 9  — Bottleneck analyser (analysis/bottleneck.py)
+  Stage 10 — Cost estimator (analysis/cost_estimator.py)
+  Stage 11 — Regression detector (analysis/regression.py)
+  Stage 12 — Report exporter (reporting/exporter.py)
+  Stage 13 — GPU profiler (profiler/gpu_profiler.py)
+  Stage 14 — Trace recorder (profiler/trace_recorder.py)
 """
 
 from __future__ import annotations
@@ -21,12 +28,19 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
+from benchmark.analysis.bottleneck import BottleneckAnalyser, BottleneckResult
+from benchmark.analysis.cost_estimator import CostEstimate, CostEstimator
 from benchmark.analysis.pareto import ParetoAnalyser
 from benchmark.analysis.recommender import RecommendationSynthesiser
+from benchmark.analysis.regression import RegressionDetector, RegressionReport
 from benchmark.analysis.slo_evaluator import SLOEvaluator
 from benchmark.config.schema import BenchmarkMetrics, BenchmarkRun
 from benchmark.config.sweep import ConfigPoint, generate_full_sweep
+from benchmark.config.validation import ConfigValidator, ValidationResult
 from benchmark.metrics.collector import MetricsCollector, RequestTiming
+from benchmark.profiler.gpu_profiler import GPUProfiler, GPUStats
+from benchmark.profiler.trace_recorder import TraceRecorder
+from benchmark.reporting.exporter import BenchmarkExporter
 from benchmark.runner.benchmark_runner import BenchmarkRunner, RunResult, RunStatus
 from benchmark.workload.generator import WorkloadGenerator
 
@@ -53,6 +67,14 @@ class PipelineConfig:
         max_parallel_jobs: Maximum concurrent benchmark jobs.
         throughput_floor_tps: Minimum TPS for early stopping.
         seed: Random seed for workload generation.
+        validate_configs: If True, run ConfigValidator before submission.
+        strict_validation: If True, treat config warnings as errors.
+        gpu_instance: GPU instance type name for cost estimation.
+        baseline_path: Path to a saved JSON baseline for regression detection.
+        enable_gpu_profiler: Whether to run GPU hardware profiling.
+        enable_trace_recorder: Whether to record per-request traces.
+        export_formats: List of formats to export (json, csv, markdown, html).
+        export_prefix: Filename prefix for exported reports.
     """
 
     max_gpus: int = 8
@@ -67,13 +89,25 @@ class PipelineConfig:
     throughput_floor_tps: float = 1.0
     seed: int = 42
 
+    # New profiler options
+    validate_configs: bool = True
+    strict_validation: bool = False
+    gpu_instance: str = "a100_sxm4_80gb"
+    baseline_path: Optional[str] = None
+    enable_gpu_profiler: bool = False
+    enable_trace_recorder: bool = False
+    export_formats: List[str] = field(
+        default_factory=lambda: ["json", "csv", "markdown", "html"]
+    )
+    export_prefix: str = "benchmark"
+
 
 # ---------------------------------------------------------------------------
 # Pipeline stages
 # ---------------------------------------------------------------------------
 
 class BenchmarkPipeline:
-    """End-to-end benchmark pipeline implementing the 7-stage DAG.
+    """End-to-end benchmark pipeline implementing all pipeline stages.
 
     Args:
         config: PipelineConfig controlling all pipeline parameters.
@@ -101,6 +135,16 @@ class BenchmarkPipeline:
             throughput_floor_tps=self.config.throughput_floor_tps,
         )
         self._results: List[Tuple[ConfigPoint, BenchmarkMetrics]] = []
+        self._validation_results: List[Tuple[ConfigPoint, ValidationResult]] = []
+        self._bottleneck_results: List[BottleneckResult] = []
+        self._cost_estimates: List[CostEstimate] = []
+        self._regression_reports: List[RegressionReport] = []
+        self._gpu_profiler: Optional[GPUProfiler] = (
+            GPUProfiler() if self.config.enable_gpu_profiler else None
+        )
+        self._trace_recorder: Optional[TraceRecorder] = (
+            TraceRecorder() if self.config.enable_trace_recorder else None
+        )
 
     # ------------------------------------------------------------------
     # Stage 1
@@ -250,19 +294,180 @@ class BenchmarkPipeline:
         return report
 
     # ------------------------------------------------------------------
+    # Stage 8 — Config validation
+    # ------------------------------------------------------------------
+
+    def stage8_validate_configs(
+        self, configs: List[ConfigPoint]
+    ) -> List[ConfigPoint]:
+        """Validate all configs and optionally filter out invalid ones.
+
+        Args:
+            configs: Candidate ConfigPoint list from Stage 1.
+
+        Returns:
+            Filtered list of configs that pass validation.
+        """
+        validator = ConfigValidator(strict=self.config.strict_validation)
+        valid_configs: List[ConfigPoint] = []
+        for cfg in configs:
+            result = validator.validate(cfg)
+            self._validation_results.append((cfg, result))
+            if result.is_valid:
+                valid_configs.append(cfg)
+            else:
+                logger.warning(
+                    "Stage 8: config tp=%d pp=%d suite=%s failed validation: %s",
+                    cfg.tp, cfg.pp, cfg.benchmark_suite,
+                    "; ".join(str(e) for e in result.errors),
+                )
+        logger.info(
+            "Stage 8: %d / %d configs passed validation",
+            len(valid_configs), len(configs),
+        )
+        return valid_configs
+
+    # ------------------------------------------------------------------
+    # Stage 9 — Bottleneck analysis
+    # ------------------------------------------------------------------
+
+    def stage9_analyse_bottlenecks(self) -> List[BottleneckResult]:
+        """Classify bottlenecks for all collected results.
+
+        Returns:
+            List of BottleneckResult, one per result.
+        """
+        analyser = BottleneckAnalyser()
+        self._bottleneck_results = analyser.analyse_batch(self._results)
+        bottlenecked = sum(
+            1 for r in self._bottleneck_results if r.bottlenecks
+        )
+        logger.info(
+            "Stage 9: bottlenecks detected in %d / %d configs",
+            bottlenecked, len(self._bottleneck_results),
+        )
+        return self._bottleneck_results
+
+    # ------------------------------------------------------------------
+    # Stage 10 — Cost estimation
+    # ------------------------------------------------------------------
+
+    def stage10_estimate_costs(self) -> List[CostEstimate]:
+        """Estimate GPU cloud costs for all results.
+
+        Returns:
+            List of CostEstimate instances.
+        """
+        estimator = CostEstimator(gpu_instance_name=self.config.gpu_instance)
+        self._cost_estimates = estimator.estimate_batch(self._results)
+        cheapest = estimator.cheapest(self._cost_estimates)
+        if cheapest:
+            logger.info(
+                "Stage 10: cheapest config — %s", cheapest.summary()
+            )
+        return self._cost_estimates
+
+    # ------------------------------------------------------------------
+    # Stage 11 — Regression detection
+    # ------------------------------------------------------------------
+
+    def stage11_detect_regressions(self) -> List[RegressionReport]:
+        """Compare results against a saved baseline if configured.
+
+        Returns:
+            List of RegressionReport (empty if no baseline_path set).
+        """
+        if not self.config.baseline_path:
+            logger.debug("Stage 11: no baseline_path set; skipping regression check")
+            return []
+
+        detector = RegressionDetector()
+        try:
+            self._regression_reports = detector.compare_from_file(
+                self._results, self.config.baseline_path
+            )
+            if detector.any_regression(self._regression_reports):
+                logger.warning(
+                    "Stage 11: REGRESSIONS DETECTED — see regression report"
+                )
+            else:
+                logger.info("Stage 11: no regressions detected vs baseline")
+        except FileNotFoundError:
+            logger.warning(
+                "Stage 11: baseline file not found at %s; skipping",
+                self.config.baseline_path,
+            )
+        return self._regression_reports
+
+    # ------------------------------------------------------------------
+    # Stage 12 — Report export
+    # ------------------------------------------------------------------
+
+    def stage12_export_reports(self, report_text: str) -> Dict[str, str]:
+        """Export results to all configured formats.
+
+        Args:
+            report_text: Recommendation report text from Stage 7.
+
+        Returns:
+            Dict mapping format name to output file path.
+        """
+        exporter = BenchmarkExporter(self._results, report_text)
+        output_dir = self.config.results_dir
+        paths = exporter.write_all(output_dir, prefix=self.config.export_prefix)
+        logger.info(
+            "Stage 12: reports written — %s",
+            {fmt: p for fmt, p in paths.items()},
+        )
+        return paths
+
+    # ------------------------------------------------------------------
+    # Stage 13 — GPU profiler
+    # ------------------------------------------------------------------
+
+    def stage13_start_gpu_profiling(self) -> None:
+        """Start GPU hardware metric sampling (if enabled)."""
+        if self._gpu_profiler is not None:
+            self._gpu_profiler.start_background_sampling()
+            logger.info("Stage 13: GPU profiler started")
+
+    def stage13_stop_gpu_profiling(self) -> Dict[int, GPUStats]:
+        """Stop GPU profiling and return aggregated stats.
+
+        Returns:
+            Dict mapping GPU index to GPUStats.
+        """
+        if self._gpu_profiler is None:
+            return {}
+        self._gpu_profiler.stop_background_sampling()
+        stats = self._gpu_profiler.get_stats()
+        for gpu_idx, s in stats.items():
+            logger.info("Stage 13 GPU[%d]: %s", gpu_idx, s.summary())
+        return stats
+
+    # ------------------------------------------------------------------
     # Full pipeline
     # ------------------------------------------------------------------
 
     def run(self) -> str:
-        """Execute the full 7-stage pipeline.
+        """Execute the full pipeline.
 
         Returns:
             Rendered recommendation report text.
         """
-        # Stage 1
+        # Stage 1 — generate configs
         configs = self.stage1_generate_configs()
         if not configs:
             return "No feasible configs generated."
+
+        # Stage 8 — validate configs (optional, runs before submission)
+        if self.config.validate_configs:
+            configs = self.stage8_validate_configs(configs)
+            if not configs:
+                return "All configs failed validation."
+
+        # Stage 13 — start GPU profiling
+        self.stage13_start_gpu_profiling()
 
         # Stage 3 — submit all jobs
         run_results = self.stage3_submit_jobs(configs)
@@ -281,17 +486,32 @@ class BenchmarkPipeline:
 
             self._results.append((cfg, metrics))
 
-        # Stage 6
+        # Stage 13 — stop GPU profiling
+        self.stage13_stop_gpu_profiling()
+
+        # Stage 6 — Pareto analysis
         self.stage6_pareto_analysis()
 
-        # Stage 7
+        # Stage 7 — recommendations
         report = self.stage7_recommend()
 
-        # Persist report
+        # Stage 9 — bottleneck analysis
+        self.stage9_analyse_bottlenecks()
+
+        # Stage 10 — cost estimation
+        self.stage10_estimate_costs()
+
+        # Stage 11 — regression detection
+        self.stage11_detect_regressions()
+
+        # Persist plain text report (backward compat)
         os.makedirs(self.config.results_dir, exist_ok=True)
         report_path = os.path.join(self.config.results_dir, "report.txt")
         with open(report_path, "w") as fh:
             fh.write(report)
         logger.info("Report written to %s", report_path)
+
+        # Stage 12 — export all formats
+        self.stage12_export_reports(report)
 
         return report
