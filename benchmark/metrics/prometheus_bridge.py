@@ -313,6 +313,8 @@ class PrometheusBridge:
         enriched = metrics.model_copy()
 
         if "gpu_cache_usage_perc" in snapshot.values:
+            # Matches existing collector.py mapping: vllm:gpu_cache_usage_perc
+            # is stored as gpu_mem_used_gb for backward compatibility.
             enriched.gpu_mem_used_gb = snapshot.values["gpu_cache_usage_perc"]
         if "cpu_prefix_cache_hit_rate" in snapshot.values:
             enriched.kv_cache_hit_rate = snapshot.values[

@@ -1,3 +1,8 @@
+# This Job template contains double-brace variables (e.g. {{ "{{ run_id }}" }})
+# that are substituted at runtime by the Python benchmark pipeline after Helm
+# renders the Helm-level variables. The Helm chart installs the infrastructure
+# (namespace, RBAC, PVC, ServiceMonitor); individual Jobs are rendered by
+# benchmark_runner.py using these templates.
 apiVersion: batch/v1
 kind: Job
 metadata:
