@@ -17,6 +17,13 @@ Wires together all benchmark pipeline stages:
   Stage 12 — Report exporter (reporting/exporter.py)
   Stage 13 — GPU profiler (profiler/gpu_profiler.py)
   Stage 14 — Trace recorder (profiler/trace_recorder.py)
+  Stage 15 — Memory profiler (profiler/memory_profiler.py)
+  Stage 16 — Communication profiler (profiler/communication_profiler.py)
+  Stage 17 — Energy profiler (profiler/energy_profiler.py)
+  Stage 18 — Anomaly detection (analysis/anomaly_detector.py)
+  Stage 19 — Scalability analysis (analysis/scalability.py)
+  Stage 20 — Config space exploration (config/space_explorer.py)
+  Stage 21 — Comparative reporting & dashboard (reporting/)
 """
 
 from __future__ import annotations
@@ -28,19 +35,27 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
+from benchmark.analysis.anomaly_detector import AnomalyDetector, AnomalyReport
 from benchmark.analysis.bottleneck import BottleneckAnalyser, BottleneckResult
 from benchmark.analysis.cost_estimator import CostEstimate, CostEstimator
 from benchmark.analysis.pareto import ParetoAnalyser
 from benchmark.analysis.recommender import RecommendationSynthesiser
 from benchmark.analysis.regression import RegressionDetector, RegressionReport
+from benchmark.analysis.scalability import ScalabilityAnalyzer, ScalingDataPoint
 from benchmark.analysis.slo_evaluator import SLOEvaluator
 from benchmark.config.schema import BenchmarkMetrics, BenchmarkRun
+from benchmark.config.space_explorer import ConfigSpaceExplorer, ExplorationProfile
 from benchmark.config.sweep import ConfigPoint, generate_full_sweep
 from benchmark.config.validation import ConfigValidator, ValidationResult
 from benchmark.metrics.collector import MetricsCollector, RequestTiming
 from benchmark.metrics.prometheus_bridge import PrometheusBridge
+from benchmark.profiler.communication_profiler import CommunicationProfiler
+from benchmark.profiler.energy_profiler import EnergyProfiler
 from benchmark.profiler.gpu_profiler import GPUProfiler, GPUStats
+from benchmark.profiler.memory_profiler import MemoryProfiler
 from benchmark.profiler.trace_recorder import TraceRecorder
+from benchmark.reporting.comparative_reporter import ComparativeReporter
+from benchmark.reporting.dashboard import DashboardGenerator
 from benchmark.reporting.exporter import BenchmarkExporter
 from benchmark.runner.benchmark_runner import BenchmarkRunner, RunResult, RunStatus
 from benchmark.workload.generator import WorkloadGenerator
@@ -126,6 +141,23 @@ class PipelineConfig:
     prometheus_service_name: str = "vllm-benchmark"
     prometheus_service_port: int = 8000
 
+    # --- New profiler / analysis feature flags ---
+    enable_memory_profiler: bool = False
+    enable_communication_profiler: bool = False
+    enable_energy_profiler: bool = False
+    enable_anomaly_detection: bool = False
+    enable_scalability_analysis: bool = False
+    enable_config_exploration: bool = False
+    enable_comparative_report: bool = False
+    enable_dashboard: bool = False
+
+    # Energy profiler settings
+    grid_region: str = "global-average"
+    pue: float = 1.0
+
+    # Anomaly detector settings
+    anomaly_z_threshold: float = 3.0
+
 
 # ---------------------------------------------------------------------------
 # Pipeline stages
@@ -190,6 +222,39 @@ class BenchmarkPipeline:
                 execution_mode="local",
                 pushgateway_url=self.config.pushgateway_url,
             )
+
+        # New profiler / analysis modules
+        self._memory_profiler: Optional[MemoryProfiler] = (
+            MemoryProfiler() if self.config.enable_memory_profiler else None
+        )
+        self._comm_profiler: Optional[CommunicationProfiler] = (
+            CommunicationProfiler() if self.config.enable_communication_profiler else None
+        )
+        self._energy_profiler: Optional[EnergyProfiler] = (
+            EnergyProfiler(
+                grid_region=self.config.grid_region,
+                pue=self.config.pue,
+            )
+            if self.config.enable_energy_profiler
+            else None
+        )
+        self._anomaly_detector: Optional[AnomalyDetector] = (
+            AnomalyDetector(z_threshold=self.config.anomaly_z_threshold)
+            if self.config.enable_anomaly_detection
+            else None
+        )
+        self._scalability_analyzer: Optional[ScalabilityAnalyzer] = (
+            ScalabilityAnalyzer() if self.config.enable_scalability_analysis else None
+        )
+        self._config_explorer: Optional[ConfigSpaceExplorer] = (
+            ConfigSpaceExplorer() if self.config.enable_config_exploration else None
+        )
+        self._comparative_reporter: Optional[ComparativeReporter] = (
+            ComparativeReporter() if self.config.enable_comparative_report else None
+        )
+        self._dashboard_gen: Optional[DashboardGenerator] = (
+            DashboardGenerator() if self.config.enable_dashboard else None
+        )
 
     # ------------------------------------------------------------------
     # Stage 1
@@ -546,6 +611,201 @@ class BenchmarkPipeline:
             logger.info("Stage 14: trace summary — %s", stats)
 
     # ------------------------------------------------------------------
+    # Stage 15 — Memory profiler
+    # ------------------------------------------------------------------
+
+    def stage15_start_memory_profiling(self) -> None:
+        """Start GPU memory profiling (if enabled)."""
+        if self._memory_profiler is not None:
+            self._memory_profiler.start_background_snapshots()
+            logger.info("Stage 15: memory profiler started")
+
+    def stage15_stop_memory_profiling(self) -> Dict:
+        """Stop memory profiling and return stats.
+
+        Returns:
+            Dict mapping GPU index to MemoryStats summary.
+        """
+        if self._memory_profiler is None:
+            return {}
+        self._memory_profiler.stop_background_snapshots()
+        result = {}
+        for dev in self._memory_profiler._device_indices:
+            stats = self._memory_profiler.compute_stats(dev)
+            result[dev] = stats.summary()
+            logger.info("Stage 15 GPU[%d]: %s", dev, stats.summary())
+        return result
+
+    # ------------------------------------------------------------------
+    # Stage 16 — Communication profiler
+    # ------------------------------------------------------------------
+
+    def stage16_get_comm_profile(self) -> Optional[Dict]:
+        """Analyse communication profile (if enabled).
+
+        Returns:
+            Communication profile summary dict or None.
+        """
+        if self._comm_profiler is None or len(self._comm_profiler) == 0:
+            return None
+        profile = self._comm_profiler.analyse()
+        logger.info("Stage 16: %s", profile.summary())
+        return {"summary": profile.summary()}
+
+    # ------------------------------------------------------------------
+    # Stage 17 — Energy profiler
+    # ------------------------------------------------------------------
+
+    def stage17_start_energy_profiling(self) -> None:
+        """Start energy profiling (if enabled)."""
+        if self._energy_profiler is not None:
+            self._energy_profiler.start_sampling()
+            logger.info("Stage 17: energy profiler started")
+
+    def stage17_stop_energy_profiling(
+        self, total_tokens: int = 0, total_requests: int = 0
+    ) -> Optional[Dict]:
+        """Stop energy profiling and compute carbon report.
+
+        Returns:
+            Carbon report summary dict or None.
+        """
+        if self._energy_profiler is None:
+            return None
+        self._energy_profiler.stop_sampling()
+        report = self._energy_profiler.compute_report(total_tokens, total_requests)
+        logger.info("Stage 17: %s", report.summary())
+        return {"summary": report.summary()}
+
+    # ------------------------------------------------------------------
+    # Stage 18 — Anomaly detection
+    # ------------------------------------------------------------------
+
+    def stage18_detect_anomalies(self) -> Optional[AnomalyReport]:
+        """Run anomaly detection on collected metrics (if enabled).
+
+        Returns:
+            AnomalyReport or None.
+        """
+        if self._anomaly_detector is None:
+            return None
+
+        from benchmark.analysis.anomaly_detector import MetricSample
+
+        for i, (cfg, metrics) in enumerate(self._results):
+            for metric_name in ["throughput_tps", "ttft_p99_ms", "tpot_p99_ms",
+                                "e2e_latency_p99_ms", "gpu_mem_used_gb"]:
+                val = getattr(metrics, metric_name, None)
+                if val is not None:
+                    self._anomaly_detector.add_sample(
+                        MetricSample(
+                            metric_name=metric_name,
+                            timestamp_s=float(i),
+                            value=float(val),
+                        )
+                    )
+
+        report = self._anomaly_detector.detect()
+        if report.total_anomalies > 0:
+            logger.warning("Stage 18: %d anomalies detected", report.total_anomalies)
+        else:
+            logger.info("Stage 18: no anomalies detected")
+        return report
+
+    # ------------------------------------------------------------------
+    # Stage 19 — Scalability analysis
+    # ------------------------------------------------------------------
+
+    def stage19_analyse_scalability(self) -> Optional[Dict]:
+        """Analyse scaling efficiency across GPU counts (if enabled).
+
+        Returns:
+            Scalability profile summary dict or None.
+        """
+        if self._scalability_analyzer is None:
+            return None
+
+        for cfg, metrics in self._results:
+            gpu_count = cfg.gpu_count()
+            tps = metrics.throughput_tps or 0.0
+            self._scalability_analyzer.add_point(
+                ScalingDataPoint(
+                    num_gpus=gpu_count,
+                    throughput_tps=tps,
+                    parallelism_config={
+                        "tp": cfg.tp, "pp": cfg.pp, "dp": cfg.dp,
+                    },
+                )
+            )
+
+        profile = self._scalability_analyzer.analyse()
+        logger.info("Stage 19: %s", profile.summary())
+        return {"summary": profile.summary()}
+
+    # ------------------------------------------------------------------
+    # Stage 20 — Config space exploration
+    # ------------------------------------------------------------------
+
+    def stage20_explore_config_space(self) -> Optional[ExplorationProfile]:
+        """Analyse parameter sensitivity and suggest configs (if enabled).
+
+        Returns:
+            ExplorationProfile or None.
+        """
+        if self._config_explorer is None:
+            return None
+
+        self._config_explorer.add_observations(self._results)
+        profile = self._config_explorer.analyse()
+        logger.info("Stage 20: %s", profile.summary())
+        return profile
+
+    # ------------------------------------------------------------------
+    # Stage 21 — Comparative report & dashboard
+    # ------------------------------------------------------------------
+
+    def stage21_generate_comparative_report(self) -> Optional[Dict[str, str]]:
+        """Generate comparative report and dashboard (if enabled).
+
+        Returns:
+            Dict with 'report_md' and 'dashboard_json' keys, or None.
+        """
+        output: Dict[str, str] = {}
+
+        if self._comparative_reporter is not None:
+            for i, (cfg, metrics) in enumerate(self._results):
+                label = f"cfg-{i:03d}-tp{cfg.tp}pp{cfg.pp}dp{cfg.dp}"
+                self._comparative_reporter.add_result(label, cfg, metrics)
+            summary = self._comparative_reporter.generate_report()
+            output["report_md"] = summary.to_markdown()
+
+            os.makedirs(self.config.results_dir, exist_ok=True)
+            report_path = os.path.join(
+                self.config.results_dir,
+                f"{self.config.export_prefix}_comparative.md",
+            )
+            with open(report_path, "w") as fh:
+                fh.write(output["report_md"])
+            logger.info("Stage 21: comparative report written to %s", report_path)
+
+        if self._dashboard_gen is not None:
+            for i, (cfg, metrics) in enumerate(self._results):
+                label = f"cfg-{i:03d}-tp{cfg.tp}pp{cfg.pp}dp{cfg.dp}"
+                self._dashboard_gen.add_result(label, cfg, metrics)
+            dashboard = self._dashboard_gen.generate()
+            output["dashboard_json"] = dashboard.to_json()
+
+            dash_path = os.path.join(
+                self.config.results_dir,
+                f"{self.config.export_prefix}_dashboard.json",
+            )
+            with open(dash_path, "w") as fh:
+                fh.write(output["dashboard_json"])
+            logger.info("Stage 21: dashboard written to %s", dash_path)
+
+        return output if output else None
+
+    # ------------------------------------------------------------------
     # Full pipeline
     # ------------------------------------------------------------------
 
@@ -569,10 +829,18 @@ class BenchmarkPipeline:
         # Stage 13 — start GPU profiling
         self.stage13_start_gpu_profiling()
 
+        # Stage 15 — start memory profiling
+        self.stage15_start_memory_profiling()
+
+        # Stage 17 — start energy profiling
+        self.stage17_start_energy_profiling()
+
         # Stage 3 — submit all jobs
         run_results = self.stage3_submit_jobs(configs)
 
         # Stages 2, 4, 5 — per-config
+        total_tokens = 0
+        total_requests = 0
         for cfg, run_result in zip(configs, run_results):
             # Stage 2
             workload = self.stage2_generate_workload(cfg)
@@ -585,12 +853,23 @@ class BenchmarkPipeline:
                 metrics = self.stage5_evaluate_slo(cfg, metrics)
 
             self._results.append((cfg, metrics))
+            total_tokens += int(metrics.throughput_tps or 0)
+            total_requests += 1
 
         # Stage 13 — stop GPU profiling
         self.stage13_stop_gpu_profiling()
 
+        # Stage 15 — stop memory profiling
+        self.stage15_stop_memory_profiling()
+
+        # Stage 17 — stop energy profiling
+        self.stage17_stop_energy_profiling(total_tokens, total_requests)
+
         # Stage 14 — export traces
         self.stage14_export_traces()
+
+        # Stage 16 — communication profile
+        self.stage16_get_comm_profile()
 
         # Stage 6 — Pareto analysis
         self.stage6_pareto_analysis()
@@ -607,6 +886,15 @@ class BenchmarkPipeline:
         # Stage 11 — regression detection
         self.stage11_detect_regressions()
 
+        # Stage 18 — anomaly detection
+        self.stage18_detect_anomalies()
+
+        # Stage 19 — scalability analysis
+        self.stage19_analyse_scalability()
+
+        # Stage 20 — config space exploration
+        self.stage20_explore_config_space()
+
         # Persist plain text report (backward compat)
         os.makedirs(self.config.results_dir, exist_ok=True)
         report_path = os.path.join(self.config.results_dir, "report.txt")
@@ -616,5 +904,8 @@ class BenchmarkPipeline:
 
         # Stage 12 — export all formats
         self.stage12_export_reports(report)
+
+        # Stage 21 — comparative report & dashboard
+        self.stage21_generate_comparative_report()
 
         return report
