@@ -38,6 +38,7 @@ from benchmark.config.schema import BenchmarkMetrics, BenchmarkRun
 from benchmark.config.sweep import ConfigPoint, generate_full_sweep
 from benchmark.config.validation import ConfigValidator, ValidationResult
 from benchmark.metrics.collector import MetricsCollector, RequestTiming
+from benchmark.metrics.prometheus_bridge import PrometheusBridge
 from benchmark.profiler.gpu_profiler import GPUProfiler, GPUStats
 from benchmark.profiler.trace_recorder import TraceRecorder
 from benchmark.reporting.exporter import BenchmarkExporter
@@ -121,6 +122,9 @@ class PipelineConfig:
         default_factory=lambda: ["json", "csv", "markdown", "html"]
     )
     export_prefix: str = "benchmark"
+    pushgateway_url: Optional[str] = None
+    prometheus_service_name: str = "vllm-benchmark"
+    prometheus_service_port: int = 8000
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +176,20 @@ class BenchmarkPipeline:
         self._trace_recorder: Optional[TraceRecorder] = (
             TraceRecorder() if self.config.enable_trace_recorder else None
         )
+        self._prometheus_bridge: Optional[PrometheusBridge] = None
+        if self.config.execution_mode == "kubernetes":
+            self._prometheus_bridge = PrometheusBridge(
+                execution_mode="kubernetes",
+                namespace=self.config.namespace,
+                service_name=self.config.prometheus_service_name,
+                service_port=self.config.prometheus_service_port,
+                pushgateway_url=self.config.pushgateway_url,
+            )
+        elif self.config.pushgateway_url:
+            self._prometheus_bridge = PrometheusBridge(
+                execution_mode="local",
+                pushgateway_url=self.config.pushgateway_url,
+            )
 
     # ------------------------------------------------------------------
     # Stage 1
@@ -236,22 +254,40 @@ class BenchmarkPipeline:
         run_result: RunResult,
         workload: WorkloadGenerator,
     ) -> BenchmarkMetrics:
-        """Collect and aggregate metrics for a completed run."""
+        """Collect and aggregate metrics for a completed run.
+
+        In Kubernetes mode, also scrapes the Prometheus endpoint via the
+        bridge and pushes aggregated metrics to the Pushgateway if
+        configured.
+        """
         if self._metrics_fn_override is not None:
-            return self._metrics_fn_override(cfg)
+            metrics = self._metrics_fn_override(cfg)
+        else:
+            # In production: load the BenchmarkRun JSON written by the vLLM
+            # container and populate a MetricsCollector from it.
+            run = self._runner.load_result(run_result.run_id)
+            if run is not None:
+                metrics = run.metrics
+            else:
+                # Fallback: return zero metrics (run not yet finished or dry_run).
+                logger.debug(
+                    "No result found for run_id=%s; returning zero metrics",
+                    run_result.run_id,
+                )
+                metrics = BenchmarkMetrics()
 
-        # In production: load the BenchmarkRun JSON written by the vLLM
-        # container and populate a MetricsCollector from it.
-        run = self._runner.load_result(run_result.run_id)
-        if run is not None:
-            return run.metrics
+        # Prometheus enrichment + push (Kubernetes mode)
+        if self._prometheus_bridge is not None:
+            snapshot = self._prometheus_bridge.scrape(run_result.run_id)
+            if snapshot.values:
+                metrics = self._prometheus_bridge.enrich_metrics(
+                    metrics, snapshot
+                )
+            self._prometheus_bridge.push_metrics(
+                run_result.run_id, metrics
+            )
 
-        # Fallback: return zero metrics (run not yet finished or dry_run).
-        logger.debug(
-            "No result found for run_id=%s; returning zero metrics",
-            run_result.run_id,
-        )
-        return BenchmarkMetrics()
+        return metrics
 
     # ------------------------------------------------------------------
     # Stage 5
@@ -474,6 +510,42 @@ class BenchmarkPipeline:
         return stats
 
     # ------------------------------------------------------------------
+    # Stage 14 — Trace recorder export
+    # ------------------------------------------------------------------
+
+    def stage14_export_traces(self) -> None:
+        """Export recorded traces to Chrome TEF, folded stacks, and OTLP.
+
+        Writes to the configured results_dir.
+        """
+        if self._trace_recorder is None or len(self._trace_recorder) == 0:
+            logger.debug("Stage 14: no traces recorded; skipping export")
+            return
+
+        os.makedirs(self.config.results_dir, exist_ok=True)
+        prefix = os.path.join(self.config.results_dir, self.config.export_prefix)
+
+        # Chrome trace
+        chrome_path = f"{prefix}_trace.json"
+        self._trace_recorder.export_chrome_trace_json(chrome_path)
+        logger.info("Stage 14: Chrome trace written to %s", chrome_path)
+
+        # Folded stacks
+        stacks_path = f"{prefix}_stacks.txt"
+        self._trace_recorder.export_folded_stacks_file(stacks_path)
+        logger.info("Stage 14: folded stacks written to %s", stacks_path)
+
+        # OTLP spans
+        otlp_path = f"{prefix}_otlp.json"
+        self._trace_recorder.export_otlp_json(otlp_path)
+        logger.info("Stage 14: OTLP spans written to %s", otlp_path)
+
+        # Summary stats
+        stats = self._trace_recorder.summary_stats()
+        if stats:
+            logger.info("Stage 14: trace summary — %s", stats)
+
+    # ------------------------------------------------------------------
     # Full pipeline
     # ------------------------------------------------------------------
 
@@ -516,6 +588,9 @@ class BenchmarkPipeline:
 
         # Stage 13 — stop GPU profiling
         self.stage13_stop_gpu_profiling()
+
+        # Stage 14 — export traces
+        self.stage14_export_traces()
 
         # Stage 6 — Pareto analysis
         self.stage6_pareto_analysis()

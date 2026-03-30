@@ -1,0 +1,69 @@
+# Default values for the vLLM parallelism benchmark Helm chart.
+
+# -- Namespace where benchmark resources are deployed
+namespace: benchmark
+
+# -- Container image for benchmark Job pods
+image:
+  repository: vllm/vllm-openai
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# -- Number of GPUs per Job pod (overridden per-job by the runner)
+gpuCount: 1
+
+# -- ServiceAccount for Job pods
+serviceAccount:
+  create: true
+  name: benchmark-sa
+  annotations: {}
+
+# -- Node selector labels for scheduling Job pods onto GPU nodes
+nodeSelector: {}
+  # gpu: a100
+
+# -- Tolerations for GPU nodes
+tolerations: []
+  # - key: nvidia.com/gpu
+  #   operator: Exists
+  #   effect: NoSchedule
+
+# -- PersistentVolumeClaim for storing benchmark results
+results:
+  pvcName: benchmark-results
+  storageClass: ""
+  accessMode: ReadWriteMany
+  size: 50Gi
+
+# -- Prometheus monitoring stack
+prometheus:
+  # -- Enable ServiceMonitor for auto-discovery by Prometheus Operator
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    scrapeTimeout: 10s
+    labels: {}
+  # -- Pushgateway for persisting per-run metrics after pod termination
+  pushgateway:
+    enabled: false
+    url: "http://prometheus-pushgateway.monitoring.svc.cluster.local:9091"
+
+# -- vLLM service configuration (for Prometheus scraping via K8s DNS)
+vllmService:
+  name: vllm-benchmark
+  port: 8000
+
+# -- Benchmark Job defaults
+job:
+  backoffLimit: 0
+  # -- Maximum time to wait for a Job to complete (seconds)
+  timeout: 3600
+  # -- Labels applied to all benchmark resources
+  labels:
+    app: parallelisms-benchmark
+
+# -- RBAC for the benchmark ServiceAccount
+rbac:
+  create: true
+  # -- Additional rules (e.g. for watching pods/logs)
+  additionalRules: []
