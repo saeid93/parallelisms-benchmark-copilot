@@ -259,8 +259,8 @@ class BenchmarkRunner:
         self.execution_mode = execution_mode
         self.kubeconfig = kubeconfig
         self.service_account = service_account
-        self.node_selector = node_selector or {}
-        self.tolerations = tolerations or []
+        self.node_selector = dict(node_selector) if node_selector is not None else {}
+        self.tolerations = list(tolerations) if tolerations is not None else []
         self.job_timeout_seconds = job_timeout_seconds
 
     def submit(self, cfg: ConfigPoint) -> RunResult:
@@ -286,8 +286,8 @@ class BenchmarkRunner:
             self.namespace,
             self.results_pvc,
             service_account=self.service_account,
-            node_selector=self.node_selector if self.node_selector else None,
-            tolerations=self.tolerations if self.tolerations else None,
+            node_selector=self.node_selector or None,
+            tolerations=self.tolerations or None,
         )
         if self.dry_run:
             logger.info(

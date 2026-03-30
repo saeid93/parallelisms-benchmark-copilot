@@ -102,6 +102,10 @@ def get_model_variant(name: str) -> ModelVariant:
     return MODEL_VARIANTS[name]
 
 
+# Fallback variant used when no explicit model_variants list is supplied.
+_DEFAULT_MODEL_ID = "meta-llama/Llama-2-13b-hf"
+
+
 # ---------------------------------------------------------------------------
 # Sweep dimension definitions (Section 1)
 # ---------------------------------------------------------------------------
@@ -357,7 +361,7 @@ def generate_parallelism_sweep(
     if model_variants:
         variants = [get_model_variant(n) for n in model_variants]
     else:
-        variants = [ModelVariant(model_id="meta-llama/Llama-2-13b-hf", params_gb=model_params_gb)]
+        variants = [ModelVariant(model_id=_DEFAULT_MODEL_ID, params_gb=model_params_gb)]
 
     for variant in variants:
         for tp, pp, dp, dataset in itertools.product(
@@ -394,7 +398,7 @@ def generate_distserve_sweep(
     if model_variants:
         variants = [get_model_variant(n) for n in model_variants]
     else:
-        variants = [ModelVariant(model_id="meta-llama/Llama-2-13b-hf", params_gb=model_params_gb)]
+        variants = [ModelVariant(model_id=_DEFAULT_MODEL_ID, params_gb=model_params_gb)]
 
     for variant in variants:
         for (
@@ -441,7 +445,7 @@ def generate_sarathi_sweep(
     if model_variants:
         variants = [get_model_variant(n) for n in model_variants]
     else:
-        variants = [ModelVariant(model_id="meta-llama/Llama-2-13b-hf", params_gb=model_params_gb)]
+        variants = [ModelVariant(model_id=_DEFAULT_MODEL_ID, params_gb=model_params_gb)]
 
     for variant in variants:
         for tp, pp, chunk_size, batching_scheme, pd_ratio, dataset in itertools.product(
@@ -479,7 +483,7 @@ def generate_seesaw_sweep(
     if model_variants:
         variants = [get_model_variant(n) for n in model_variants]
     else:
-        variants = [ModelVariant(model_id="meta-llama/Llama-2-13b-hf", params_gb=model_params_gb)]
+        variants = [ModelVariant(model_id=_DEFAULT_MODEL_ID, params_gb=model_params_gb)]
 
     for variant in variants:
         for (
