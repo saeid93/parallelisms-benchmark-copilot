@@ -15,6 +15,12 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 
 class BenchmarkConfig(BaseModel):
+    # model
+    model_id: str = Field(
+        "meta-llama/Llama-2-13b-hf",
+        description="HuggingFace model identifier to benchmark",
+    )
+
     # parallelism
     tp: int = Field(1, description="Tensor parallel size")
     pp: int = Field(1, description="Pipeline parallel size")

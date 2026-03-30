@@ -10,7 +10,96 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass, field
-from typing import Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Model variant registry
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ModelVariant:
+    """Metadata for a single model variant used in sweep generation.
+
+    Attributes:
+        model_id: HuggingFace model identifier (e.g. "meta-llama/Llama-2-13b-hf").
+        params_gb: Approximate model parameter memory footprint in GiB.
+        default_max_model_len: Default max sequence length for this model.
+    """
+
+    model_id: str
+    params_gb: float
+    default_max_model_len: int = 8192
+
+
+# Curated registry of common model variants.
+MODEL_VARIANTS: Dict[str, ModelVariant] = {
+    "llama-2-7b": ModelVariant(
+        model_id="meta-llama/Llama-2-7b-hf",
+        params_gb=14.0,
+        default_max_model_len=4096,
+    ),
+    "llama-2-13b": ModelVariant(
+        model_id="meta-llama/Llama-2-13b-hf",
+        params_gb=26.0,
+        default_max_model_len=4096,
+    ),
+    "llama-2-70b": ModelVariant(
+        model_id="meta-llama/Llama-2-70b-hf",
+        params_gb=140.0,
+        default_max_model_len=4096,
+    ),
+    "llama-3-8b": ModelVariant(
+        model_id="meta-llama/Meta-Llama-3-8B",
+        params_gb=16.0,
+        default_max_model_len=8192,
+    ),
+    "llama-3-70b": ModelVariant(
+        model_id="meta-llama/Meta-Llama-3-70B",
+        params_gb=140.0,
+        default_max_model_len=8192,
+    ),
+    "mistral-7b": ModelVariant(
+        model_id="mistralai/Mistral-7B-v0.1",
+        params_gb=14.0,
+        default_max_model_len=8192,
+    ),
+    "mixtral-8x7b": ModelVariant(
+        model_id="mistralai/Mixtral-8x7B-v0.1",
+        params_gb=93.0,
+        default_max_model_len=32768,
+    ),
+    "qwen-2-7b": ModelVariant(
+        model_id="Qwen/Qwen2-7B",
+        params_gb=14.0,
+        default_max_model_len=32768,
+    ),
+    "qwen-2-72b": ModelVariant(
+        model_id="Qwen/Qwen2-72B",
+        params_gb=144.0,
+        default_max_model_len=32768,
+    ),
+}
+
+
+def get_model_variant(name: str) -> ModelVariant:
+    """Look up a model variant by short name.
+
+    Args:
+        name: Short name key in MODEL_VARIANTS (e.g. "llama-2-7b").
+
+    Returns:
+        The corresponding ModelVariant.
+
+    Raises:
+        KeyError: If the name is not in the registry.
+    """
+    if name not in MODEL_VARIANTS:
+        raise KeyError(
+            f"Unknown model variant {name!r}. "
+            f"Available: {sorted(MODEL_VARIANTS)}"
+        )
+    return MODEL_VARIANTS[name]
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +197,9 @@ SLO_SCALE_SWEEP = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
 @dataclass
 class ConfigPoint:
     """A single point in the sweep configuration space."""
+
+    # model
+    model_id: str = "meta-llama/Llama-2-13b-hf"
 
     # parallelism
     tp: int = 1
@@ -252,20 +344,36 @@ def generate_parallelism_sweep(
     datasets: List[str] = WORKLOAD_DATASETS,
     max_gpus: int = 8,
     model_params_gb: float = 14.0,
+    model_variants: Optional[List[str]] = None,
 ) -> Iterator[ConfigPoint]:
-    """Yield feasible configs for the general vllm_parallelism suite."""
-    for tp, pp, dp, dataset in itertools.product(
-        tp_sizes, pp_sizes, dp_replicas, datasets
-    ):
-        cfg = ConfigPoint(
-            tp=tp,
-            pp=pp,
-            dp=dp,
-            dataset=dataset,
-            benchmark_suite="vllm_parallelism",
-        )
-        if _is_feasible(cfg, max_gpus, model_params_gb):
-            yield cfg
+    """Yield feasible configs for the general vllm_parallelism suite.
+
+    Args:
+        model_variants: Optional list of short model variant names from the
+            MODEL_VARIANTS registry.  When provided the sweep iterates over
+            each variant, using its ``params_gb`` for the OOM check and
+            setting ``model_id`` on every emitted ConfigPoint.
+    """
+    if model_variants:
+        variants = [get_model_variant(n) for n in model_variants]
+    else:
+        variants = [ModelVariant(model_id="meta-llama/Llama-2-13b-hf", params_gb=model_params_gb)]
+
+    for variant in variants:
+        for tp, pp, dp, dataset in itertools.product(
+            tp_sizes, pp_sizes, dp_replicas, datasets
+        ):
+            cfg = ConfigPoint(
+                model_id=variant.model_id,
+                tp=tp,
+                pp=pp,
+                dp=dp,
+                dataset=dataset,
+                max_model_len=variant.default_max_model_len,
+                benchmark_suite="vllm_parallelism",
+            )
+            if _is_feasible(cfg, max_gpus, variant.params_gb):
+                yield cfg
 
 
 def generate_distserve_sweep(
@@ -279,32 +387,41 @@ def generate_distserve_sweep(
     datasets: List[str] = WORKLOAD_DATASETS,
     max_gpus: int = 8,
     model_params_gb: float = 14.0,
+    model_variants: Optional[List[str]] = None,
 ) -> Iterator[ConfigPoint]:
     """Yield feasible configs for the DistServe disaggregated suite."""
-    for (
-        prefill_tp, prefill_pp, decode_tp, decode_pp,
-        ttft_slo, tpot_slo, slo_scale, dataset
-    ) in itertools.product(
-        prefill_tp_sizes, prefill_pp_sizes,
-        decode_tp_sizes, decode_pp_sizes,
-        ttft_slos, tpot_slos, slo_scales, datasets,
-    ):
-        cfg = ConfigPoint(
-            tp=max(prefill_tp, decode_tp),
-            pp=max(prefill_pp, decode_pp),
-            prefill_tp=prefill_tp,
-            prefill_pp=prefill_pp,
-            decode_tp=decode_tp,
-            decode_pp=decode_pp,
-            disaggregation_mode="distserve",
-            ttft_slo_ms=ttft_slo,
-            tpot_slo_ms=tpot_slo,
-            slo_scale=slo_scale,
-            dataset=dataset,
-            benchmark_suite="distserve",
-        )
-        if _is_feasible(cfg, max_gpus, model_params_gb):
-            yield cfg
+    if model_variants:
+        variants = [get_model_variant(n) for n in model_variants]
+    else:
+        variants = [ModelVariant(model_id="meta-llama/Llama-2-13b-hf", params_gb=model_params_gb)]
+
+    for variant in variants:
+        for (
+            prefill_tp, prefill_pp, decode_tp, decode_pp,
+            ttft_slo, tpot_slo, slo_scale, dataset
+        ) in itertools.product(
+            prefill_tp_sizes, prefill_pp_sizes,
+            decode_tp_sizes, decode_pp_sizes,
+            ttft_slos, tpot_slos, slo_scales, datasets,
+        ):
+            cfg = ConfigPoint(
+                model_id=variant.model_id,
+                tp=max(prefill_tp, decode_tp),
+                pp=max(prefill_pp, decode_pp),
+                prefill_tp=prefill_tp,
+                prefill_pp=prefill_pp,
+                decode_tp=decode_tp,
+                decode_pp=decode_pp,
+                disaggregation_mode="distserve",
+                ttft_slo_ms=ttft_slo,
+                tpot_slo_ms=tpot_slo,
+                slo_scale=slo_scale,
+                dataset=dataset,
+                max_model_len=variant.default_max_model_len,
+                benchmark_suite="distserve",
+            )
+            if _is_feasible(cfg, max_gpus, variant.params_gb):
+                yield cfg
 
 
 def generate_sarathi_sweep(
@@ -316,23 +433,32 @@ def generate_sarathi_sweep(
     datasets: List[str] = WORKLOAD_DATASETS,
     max_gpus: int = 8,
     model_params_gb: float = 14.0,
+    model_variants: Optional[List[str]] = None,
 ) -> Iterator[ConfigPoint]:
     """Yield feasible configs for the SARATHI chunked-prefill suite."""
-    for tp, pp, chunk_size, batching_scheme, pd_ratio, dataset in itertools.product(
-        tp_sizes, pp_sizes, chunk_sizes, batching_schemes, pd_ratios, datasets
-    ):
-        cfg = ConfigPoint(
-            tp=tp,
-            pp=pp,
-            chunked_prefill=True,
-            chunk_size=chunk_size,
-            batching_scheme=batching_scheme,
-            pd_ratio=float(pd_ratio),
-            dataset=dataset,
-            benchmark_suite="sarathi",
-        )
-        if _is_feasible(cfg, max_gpus, model_params_gb):
-            yield cfg
+    if model_variants:
+        variants = [get_model_variant(n) for n in model_variants]
+    else:
+        variants = [ModelVariant(model_id="meta-llama/Llama-2-13b-hf", params_gb=model_params_gb)]
+
+    for variant in variants:
+        for tp, pp, chunk_size, batching_scheme, pd_ratio, dataset in itertools.product(
+            tp_sizes, pp_sizes, chunk_sizes, batching_schemes, pd_ratios, datasets
+        ):
+            cfg = ConfigPoint(
+                model_id=variant.model_id,
+                tp=tp,
+                pp=pp,
+                chunked_prefill=True,
+                chunk_size=chunk_size,
+                batching_scheme=batching_scheme,
+                pd_ratio=float(pd_ratio),
+                dataset=dataset,
+                max_model_len=variant.default_max_model_len,
+                benchmark_suite="sarathi",
+            )
+            if _is_feasible(cfg, max_gpus, variant.params_gb):
+                yield cfg
 
 
 def generate_seesaw_sweep(
@@ -344,41 +470,57 @@ def generate_seesaw_sweep(
     datasets: List[str] = WORKLOAD_DATASETS,
     max_gpus: int = 8,
     model_params_gb: float = 14.0,
+    model_variants: Optional[List[str]] = None,
 ) -> Iterator[ConfigPoint]:
     """Yield feasible configs for the Seesaw dynamic re-sharding suite."""
-    for (
-        tp, pp, cpu_kv_buffer_gb, kv_cache_layout, transition_policy, dataset
-    ) in itertools.product(
-        tp_sizes, pp_sizes,
-        cpu_kv_buffer_gb_values, kv_cache_layouts, transition_policies, datasets,
-    ):
-        resharding_pair = f"PP{pp}->TP{tp}"
-        cfg = ConfigPoint(
-            tp=tp,
-            pp=pp,
-            disaggregation_mode="seesaw_resharding",
-            resharding_pair=resharding_pair,
-            cpu_kv_buffer_gb=cpu_kv_buffer_gb,
-            kv_cache_layout=kv_cache_layout,
-            transition_policy=transition_policy,
-            dataset=dataset,
-            benchmark_suite="seesaw",
-        )
-        if _is_feasible(cfg, max_gpus, model_params_gb):
-            yield cfg
+    if model_variants:
+        variants = [get_model_variant(n) for n in model_variants]
+    else:
+        variants = [ModelVariant(model_id="meta-llama/Llama-2-13b-hf", params_gb=model_params_gb)]
+
+    for variant in variants:
+        for (
+            tp, pp, cpu_kv_buffer_gb, kv_cache_layout, transition_policy, dataset
+        ) in itertools.product(
+            tp_sizes, pp_sizes,
+            cpu_kv_buffer_gb_values, kv_cache_layouts, transition_policies, datasets,
+        ):
+            resharding_pair = f"PP{pp}->TP{tp}"
+            cfg = ConfigPoint(
+                model_id=variant.model_id,
+                tp=tp,
+                pp=pp,
+                disaggregation_mode="seesaw_resharding",
+                resharding_pair=resharding_pair,
+                cpu_kv_buffer_gb=cpu_kv_buffer_gb,
+                kv_cache_layout=kv_cache_layout,
+                transition_policy=transition_policy,
+                dataset=dataset,
+                max_model_len=variant.default_max_model_len,
+                benchmark_suite="seesaw",
+            )
+            if _is_feasible(cfg, max_gpus, variant.params_gb):
+                yield cfg
 
 
 def generate_full_sweep(
     max_gpus: int = 8,
     model_params_gb: float = 14.0,
     suites: Optional[List[str]] = None,
+    model_variants: Optional[List[str]] = None,
 ) -> List[ConfigPoint]:
     """Generate the full config sweep across all benchmark suites.
 
     Args:
         max_gpus: Total GPUs available for hardware feasibility pruning.
         model_params_gb: Approximate model parameter footprint in GiB.
+            Ignored when *model_variants* is provided (each variant
+            carries its own ``params_gb``).
         suites: List of suite names to include. Defaults to all four suites.
+        model_variants: Optional list of short model variant names from the
+            MODEL_VARIANTS registry.  When provided the sweep iterates
+            over each variant, using its ``params_gb`` for OOM checks and
+            setting ``model_id`` on every emitted ConfigPoint.
 
     Returns:
         A list of feasible ConfigPoint instances.
@@ -386,21 +528,15 @@ def generate_full_sweep(
     enabled = set(suites or ["vllm_parallelism", "distserve", "sarathi", "seesaw"])
     configs: List[ConfigPoint] = []
 
+    sweep_kwargs = dict(max_gpus=max_gpus, model_params_gb=model_params_gb, model_variants=model_variants)
+
     if "vllm_parallelism" in enabled:
-        configs.extend(
-            generate_parallelism_sweep(max_gpus=max_gpus, model_params_gb=model_params_gb)
-        )
+        configs.extend(generate_parallelism_sweep(**sweep_kwargs))
     if "distserve" in enabled:
-        configs.extend(
-            generate_distserve_sweep(max_gpus=max_gpus, model_params_gb=model_params_gb)
-        )
+        configs.extend(generate_distserve_sweep(**sweep_kwargs))
     if "sarathi" in enabled:
-        configs.extend(
-            generate_sarathi_sweep(max_gpus=max_gpus, model_params_gb=model_params_gb)
-        )
+        configs.extend(generate_sarathi_sweep(**sweep_kwargs))
     if "seesaw" in enabled:
-        configs.extend(
-            generate_seesaw_sweep(max_gpus=max_gpus, model_params_gb=model_params_gb)
-        )
+        configs.extend(generate_seesaw_sweep(**sweep_kwargs))
 
     return configs

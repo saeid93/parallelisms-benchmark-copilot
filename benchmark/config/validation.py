@@ -310,6 +310,32 @@ def _check_pipeline(cfg) -> List[ValidationIssue]:
     return issues
 
 
+def _check_model_variant(cfg) -> List[ValidationIssue]:
+    issues: List[ValidationIssue] = []
+    model_id = getattr(cfg, "model_id", None)
+
+    if not model_id:
+        issues.append(ValidationIssue(
+            severity=Severity.ERROR,
+            rule="model_id_required",
+            message="model_id must be set to a non-empty HuggingFace model identifier.",
+        ))
+        return issues
+
+    # Warn if model_id looks like a short name instead of a HuggingFace path
+    if "/" not in model_id:
+        issues.append(ValidationIssue(
+            severity=Severity.WARNING,
+            rule="model_id_format",
+            message=(
+                f"model_id={model_id!r} does not contain '/'; expected "
+                "a HuggingFace model path like 'org/model-name'."
+            ),
+        ))
+
+    return issues
+
+
 # ---------------------------------------------------------------------------
 # ConfigValidator
 # ---------------------------------------------------------------------------
@@ -330,6 +356,7 @@ class ConfigValidator:
         _check_chunked_prefill,
         _check_memory,
         _check_pipeline,
+        _check_model_variant,
     ]
 
     def __init__(self, strict: bool = False) -> None:
