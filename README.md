@@ -1,6 +1,6 @@
 # parallelisms-benchmark-copilot
 
-**vLLM Parallelism & Serving Config Research Agent** — a 7-stage iterative DAG benchmark system for exploring the full vLLM parallelism and serving configuration space.
+**vLLM Parallelism & Serving Config Research Agent** — a 14-stage iterative DAG benchmark system for exploring the full vLLM parallelism and serving configuration space.
 
 ## Architecture
 
@@ -15,6 +15,13 @@ The system implements the following pipeline stages:
 | 5 | `benchmark/analysis/slo_evaluator.py` | SLO attainment evaluator — binary-search goodput curves, slo_scale sweep |
 | 6 | `benchmark/analysis/pareto.py` | Pareto analyser — multi-objective Pareto frontier per benchmark suite |
 | 7 | `benchmark/analysis/recommender.py` | Recommendation synthesiser — plain-text tradeoff report, paper cross-validation |
+| 8 | `benchmark/config/validation.py` | Config validator — pre-submission feasibility checks |
+| 9 | `benchmark/analysis/bottleneck.py` | Bottleneck analyser — classify performance bottlenecks |
+| 10 | `benchmark/analysis/cost_estimator.py` | Cost estimator — GPU cloud cost estimation per config |
+| 11 | `benchmark/analysis/regression.py` | Regression detector — compare against saved baselines |
+| 12 | `benchmark/reporting/exporter.py` | Report exporter — JSON, CSV, Markdown, HTML export |
+| 13 | `benchmark/profiler/gpu_profiler.py` | GPU profiler — NVML hardware sampling (util, mem, power, NVLink) |
+| 14 | `benchmark/profiler/trace_recorder.py` | Trace recorder — per-request Chrome TEF / OTLP / flame graph export |
 
 ## Config Sweep Dimensions
 
@@ -33,6 +40,71 @@ The system implements the following pipeline stages:
 | `distserve` | Disaggregated prefill/decode — goodput per GPU under SLO |
 | `sarathi` | Chunked prefill — decode speedup vs pipeline bubble ratio |
 | `seesaw` | Dynamic re-sharding — offline throughput, prefill/decode balance |
+
+## Per-Request Trace Recording
+
+The trace recorder (Stage 14) captures complete per-request execution traces:
+
+- **Request lifecycle phases**: queue → prefill → decode → completion
+- **Decode token iteration timing**: per-output-token step durations for TPOT analysis
+- **Layer-level timing**: per-layer execution times during prefill and decode
+- **GPU kernel events**: kernel launch timestamps and durations per CUDA stream
+- **KV cache events**: hit, miss, eviction, swap-in, swap-out with block counts
+
+Export formats:
+- **Chrome DevTools / Perfetto** (JSON Trace Event Format)
+- **OpenTelemetry spans** (OTLP-compatible JSON, suitable for Jaeger/Zipkin)
+- **Flame graph** (folded-stacks format)
+
+## Prometheus Integration
+
+The Prometheus bridge (`benchmark/metrics/prometheus_bridge.py`) provides:
+
+- **ServiceMonitor-aware scraping** in Kubernetes mode — auto-discovers vLLM pods via in-cluster Service DNS
+- **Pushgateway support** — pushes aggregated per-run metrics so they survive pod termination
+- **vLLM metric parsing** — extracts throughput, latency histograms, cache usage, scheduler state from vLLM's `/metrics` endpoint
+- **Metrics enrichment** — augments `BenchmarkMetrics` with live Prometheus data
+
+## Kubernetes Deployment (Helm)
+
+All Kubernetes resources are packaged as a Helm chart in `helm/benchmark/`:
+
+```bash
+# Install the benchmark infrastructure
+helm upgrade --install benchmark helm/benchmark/ \
+  --namespace benchmark \
+  --create-namespace \
+  --set image.repository=vllm/vllm-openai \
+  --set image.tag=latest
+```
+
+Helm chart includes:
+- **Namespace**, **ServiceAccount**, **RBAC** (Role + RoleBinding)
+- **PersistentVolumeClaim** for result storage
+- **Service** fronting vLLM pods for Prometheus scraping
+- **ServiceMonitor** for Prometheus Operator auto-discovery
+- **Job** and **ConfigMap** templates for benchmark runs
+
+## Automation Script
+
+The `scripts/run_benchmark.sh` script automates the full workflow:
+
+```bash
+./scripts/run_benchmark.sh \
+  --namespace benchmark \
+  --image vllm/vllm-openai:latest \
+  --max-gpus 8 \
+  --suites vllm_parallelism,distserve \
+  --results-dir ./results \
+  --pushgateway-url http://pushgw:9091
+```
+
+The script:
+1. Validates prerequisites (helm, kubectl, python3)
+2. Installs / upgrades the Helm chart
+3. Runs the Python benchmark pipeline in Kubernetes mode
+4. Collects results
+5. Optionally tears down the Helm release (`--teardown`)
 
 ## Output Schema
 
@@ -75,7 +147,3 @@ print(report)
 ```bash
 python -m pytest tests/ -v
 ```
-
-## Kubernetes Deployment
-
-Job and ConfigMap templates are in `k8s/`. Each benchmark run is submitted as a separate `batch/v1 Job` with GPU resource requests matching `tp × pp` (or `prefill_tp × prefill_pp + decode_tp × decode_pp` for disaggregated configs). Results are persisted to a PersistentVolumeClaim and scraped via Prometheus.
