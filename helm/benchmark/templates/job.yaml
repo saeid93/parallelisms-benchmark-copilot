@@ -1,0 +1,63 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark-{{ "{{ run_id_short }}" }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "benchmark.labels" . | nindent 4 }}
+    suite: {{ "{{ benchmark_suite }}" }}
+    run-id: {{ "{{ run_id }}" }}
+spec:
+  backoffLimit: {{ .Values.job.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "benchmark.selectorLabels" . | nindent 8 }}
+        run-id: {{ "{{ run_id }}" }}
+    spec:
+      restartPolicy: Never
+      {{- if .Values.serviceAccount.create }}
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: benchmark
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: RUN_ID
+              value: {{ "{{ run_id }}" }}
+            - name: BENCHMARK_SUITE
+              value: {{ "{{ benchmark_suite }}" }}
+            - name: MODEL_ID
+              value: {{ "{{ model_id }}" }}
+            - name: TP
+              value: "{{ "{{ tp }}" }}"
+            - name: PP
+              value: "{{ "{{ pp }}" }}"
+            - name: DP
+              value: "{{ "{{ dp }}" }}"
+            - name: RESULTS_DIR
+              value: /results
+          resources:
+            requests:
+              nvidia.com/gpu: "{{ .Values.gpuCount }}"
+            limits:
+              nvidia.com/gpu: "{{ .Values.gpuCount }}"
+          ports:
+            - containerPort: {{ .Values.vllmService.port }}
+              name: metrics
+          volumeMounts:
+            - mountPath: /results
+              name: results-volume
+      volumes:
+        - name: results-volume
+          persistentVolumeClaim:
+            claimName: {{ .Values.results.pvcName }}
