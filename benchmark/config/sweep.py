@@ -370,6 +370,7 @@ def generate_parallelism_sweep(
                 dp=dp,
                 dataset=dataset,
                 max_model_len=variant.default_max_model_len,
+                max_seq_len_to_capture=min(8192, variant.default_max_model_len),
                 benchmark_suite="vllm_parallelism",
             )
             if _is_feasible(cfg, max_gpus, variant.params_gb):
@@ -418,6 +419,7 @@ def generate_distserve_sweep(
                 slo_scale=slo_scale,
                 dataset=dataset,
                 max_model_len=variant.default_max_model_len,
+                max_seq_len_to_capture=min(8192, variant.default_max_model_len),
                 benchmark_suite="distserve",
             )
             if _is_feasible(cfg, max_gpus, variant.params_gb):
@@ -455,6 +457,7 @@ def generate_sarathi_sweep(
                 pd_ratio=float(pd_ratio),
                 dataset=dataset,
                 max_model_len=variant.default_max_model_len,
+                max_seq_len_to_capture=min(8192, variant.default_max_model_len),
                 benchmark_suite="sarathi",
             )
             if _is_feasible(cfg, max_gpus, variant.params_gb):
@@ -497,6 +500,7 @@ def generate_seesaw_sweep(
                 transition_policy=transition_policy,
                 dataset=dataset,
                 max_model_len=variant.default_max_model_len,
+                max_seq_len_to_capture=min(8192, variant.default_max_model_len),
                 benchmark_suite="seesaw",
             )
             if _is_feasible(cfg, max_gpus, variant.params_gb):
