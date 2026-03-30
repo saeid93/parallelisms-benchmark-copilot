@@ -57,12 +57,26 @@ class PipelineConfig:
 
     Attributes:
         max_gpus: Total GPUs available for hardware feasibility pruning.
-        model_params_gb: Approximate model parameter size in GiB.
+        model_params_gb: Approximate model parameter size in GiB (ignored when
+            *model_variants* is provided).
+        model_variants: Optional list of short model variant names from the
+            MODEL_VARIANTS registry.  When provided the sweep iterates over
+            each variant, using its ``params_gb`` for OOM checks and setting
+            ``model_id`` on every emitted ConfigPoint.
         suites: Benchmark suites to run (None means all four).
+        execution_mode: How to run benchmark jobs — ``"local"`` writes
+            manifests / runs locally, ``"kubernetes"`` submits real K8s Jobs.
         image: Container image for Kubernetes Jobs.
         namespace: Kubernetes namespace.
         results_pvc: PersistentVolumeClaim for result storage.
-        results_dir: Local results directory (used in dry_run mode).
+        kubeconfig: Path to kubeconfig file.  ``None`` uses the in-cluster
+            default or ``$KUBECONFIG``.
+        service_account: Kubernetes ServiceAccount for Job pods.
+        node_selector: Optional node selector labels for K8s Job pods.
+        tolerations: Optional tolerations for K8s Job pods.
+        job_timeout_seconds: Maximum wall-clock seconds to wait for a single
+            Kubernetes Job before marking it FAILED.
+        results_dir: Local results directory (used in dry_run / local mode).
         dry_run: If True, skip actual Job submission.
         max_parallel_jobs: Maximum concurrent benchmark jobs.
         throughput_floor_tps: Minimum TPS for early stopping.
@@ -79,10 +93,17 @@ class PipelineConfig:
 
     max_gpus: int = 8
     model_params_gb: float = 14.0
+    model_variants: Optional[List[str]] = None
     suites: Optional[List[str]] = None
+    execution_mode: str = "local"  # "local" or "kubernetes"
     image: str = "vllm/vllm-openai:latest"
     namespace: str = "benchmark"
     results_pvc: str = "benchmark-results"
+    kubeconfig: Optional[str] = None
+    service_account: Optional[str] = None
+    node_selector: Optional[Dict[str, str]] = None
+    tolerations: Optional[List[Dict[str, str]]] = None
+    job_timeout_seconds: int = 3600
     results_dir: str = "/tmp/benchmark-results"
     dry_run: bool = True
     max_parallel_jobs: int = 8
@@ -133,6 +154,12 @@ class BenchmarkPipeline:
             results_dir=self.config.results_dir,
             dry_run=self.config.dry_run,
             throughput_floor_tps=self.config.throughput_floor_tps,
+            execution_mode=self.config.execution_mode,
+            kubeconfig=self.config.kubeconfig,
+            service_account=self.config.service_account,
+            node_selector=self.config.node_selector,
+            tolerations=self.config.tolerations,
+            job_timeout_seconds=self.config.job_timeout_seconds,
         )
         self._results: List[Tuple[ConfigPoint, BenchmarkMetrics]] = []
         self._validation_results: List[Tuple[ConfigPoint, ValidationResult]] = []
@@ -161,6 +188,7 @@ class BenchmarkPipeline:
             max_gpus=self.config.max_gpus,
             model_params_gb=self.config.model_params_gb,
             suites=self.config.suites,
+            model_variants=self.config.model_variants,
         )
         logger.info("Stage 1: %d feasible configs generated", len(configs))
         return configs

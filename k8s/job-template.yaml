@@ -24,6 +24,8 @@ spec:
               value: "{{ run_id }}"
             - name: BENCHMARK_SUITE
               value: "{{ benchmark_suite }}"
+            - name: MODEL_ID
+              value: "{{ model_id }}"
             - name: TP
               value: "{{ tp }}"
             - name: PP
